@@ -29,6 +29,9 @@ from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import random_seed
+from tensorflow.python.keras import initializers
+from tensorflow.python.keras import testing_utils
+from tensorflow.python.keras import utils
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.ops import gradients_impl
@@ -40,14 +43,16 @@ from tensorflow.python.ops import rnn_cell
 from tensorflow.python.ops import rnn_cell_impl
 from tensorflow.python.ops import variable_scope
 from tensorflow.python.ops import variables
+from tensorflow.python.ops.losses import losses
 from tensorflow.python.platform import test
+from tensorflow.python.training import training
 from tensorflow.python.util import nest
 
 
 class RNNCellTest(test.TestCase):
 
   def testCoupledInputForgetGateLSTMCell(self):
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       num_units = 2
       state_size = num_units * 2
       batch_size = 3
@@ -81,7 +86,7 @@ class RNNCellTest(test.TestCase):
         self.assertAllClose(res[1], expected_state)
 
   def testTimeFreqLSTMCell(self):
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       num_units = 8
       state_size = num_units * 2
       batch_size = 3
@@ -120,7 +125,7 @@ class RNNCellTest(test.TestCase):
               float(np.linalg.norm((res[1][0, :] - res[1][i, :]))) > 1e-6)
 
   def testGridLSTMCell(self):
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       num_units = 8
       batch_size = 3
       input_size = 4
@@ -166,7 +171,7 @@ class RNNCellTest(test.TestCase):
                                   .state_f00_b00_c[i, :]))) > 1e-6)
 
   def testGridLSTMCellWithFrequencyBlocks(self):
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       num_units = 8
       batch_size = 3
       feature_size = 2
@@ -248,7 +253,7 @@ class RNNCellTest(test.TestCase):
         ]],
         dtype=np.float32)
     for state_is_tuple in [False, True]:
-      with self.test_session() as sess:
+      with self.cached_session() as sess:
         with variable_scope.variable_scope(
             "state_is_tuple" + str(state_is_tuple),
             initializer=init_ops.constant_initializer(0.5)):
@@ -294,7 +299,7 @@ class RNNCellTest(test.TestCase):
             self.assertAllClose(np.concatenate(res[1], axis=1), expected_state)
 
   def testBidirectionGridLSTMCell(self):
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       num_units = 2
       batch_size = 3
       input_size = 4
@@ -374,7 +379,7 @@ class RNNCellTest(test.TestCase):
         self.assertAllClose(np.concatenate(res[1], axis=1), expected_state)
 
   def testBidirectionGridLSTMCellWithSliceOffset(self):
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       num_units = 2
       batch_size = 3
       input_size = 4
@@ -455,8 +460,8 @@ class RNNCellTest(test.TestCase):
         self.assertAllClose(np.concatenate(res[1], axis=1), expected_state)
 
   def testAttentionCellWrapperFailures(self):
-    with self.assertRaisesRegexp(TypeError,
-                                 "The parameter cell is not RNNCell."):
+    with self.assertRaisesRegexp(
+        TypeError, rnn_cell_impl.ASSERT_LIKE_RNNCELL_ERROR_REGEXP):
       contrib_rnn_cell.AttentionCellWrapper(None, 0)
 
     num_units = 8
@@ -487,7 +492,7 @@ class RNNCellTest(test.TestCase):
     input_size = 4
     for state_is_tuple in [False, True]:
       with ops.Graph().as_default():
-        with self.test_session() as sess:
+        with self.cached_session() as sess:
           with variable_scope.variable_scope(
               "state_is_tuple_" + str(state_is_tuple)):
             lstm_cell = rnn_cell.BasicLSTMCell(
@@ -538,7 +543,7 @@ class RNNCellTest(test.TestCase):
     batch_size = 3
     for state_is_tuple in [False, True]:
       with ops.Graph().as_default():
-        with self.test_session() as sess:
+        with self.cached_session() as sess:
           with variable_scope.variable_scope(
               "state_is_tuple_" + str(state_is_tuple)):
             lstm_cell = rnn_cell.BasicLSTMCell(
@@ -677,7 +682,7 @@ class RNNCellTest(test.TestCase):
         0.79457647, 0.79457647, 0.79457647, 0.79457647, 0.79457653, 0.79457653,
         0.62739348, 0.62739348, 0.62739348, 0.62739348, 0.62739348, 0.62739348
     ]])
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       with variable_scope.variable_scope(
           "nas_test", initializer=init_ops.constant_initializer(0.5)):
         cell = contrib_rnn_cell.NASCell(num_units=num_units)
@@ -725,7 +730,7 @@ class RNNCellTest(test.TestCase):
         0.78973997, 0.78973997, 0.78973997, 0.78973997, 0.78973997, 0.78973997,
         1.87398517, 1.87398517, 1.87398517, 1.87398517, 1.87398517
     ]])
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       with variable_scope.variable_scope(
           "nas_proj_test", initializer=init_ops.constant_initializer(0.5)):
         cell = contrib_rnn_cell.NASCell(num_units=num_units, num_proj=num_proj)
@@ -765,7 +770,7 @@ class RNNCellTest(test.TestCase):
         [[0.13752282, 0.13752282], [0.10545051, 0.10545051],
          [0.10074195, 0.10074195]],
         dtype=np.float32)
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       with variable_scope.variable_scope(
           "ugrnn_cell_test", initializer=init_ops.constant_initializer(0.5)):
         cell = contrib_rnn_cell.UGRNNCell(num_units=num_units)
@@ -796,7 +801,7 @@ class RNNCellTest(test.TestCase):
         [[2.00431061, 2.00431061], [4.00060606, 4.00060606],
          [6.00008249, 6.00008249]],
         dtype=np.float32)
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       with variable_scope.variable_scope(
           "intersection_rnn_cell_test",
           initializer=init_ops.constant_initializer(0.5)):
@@ -837,17 +842,17 @@ class RNNCellTest(test.TestCase):
       cell(inputs, init_state)
 
   def testPhasedLSTMCell(self):
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       num_units = 2
       batch_size = 3
       input_size = 4
       expected_state_c = np.array(
-          [[6.450831e-04, 4.697885e-04], [9.862894e-05, 7.212213e-04],
-           [4.401947e-04, 9.143004e-04]],
+          [[0.00072015, 0.00036633], [0.00083481, 0.00047266],
+           [0.00085111, 0.00053054]],
           dtype=np.float32)
       expected_state_h = np.array(
-          [[4.621217e-04, 3.365449e-04], [7.438179e-05, 5.439147e-04],
-           [3.347936e-04, 6.953785e-04]],
+          [[0.0005159, 0.00026243], [0.00062958, 0.00035646],
+           [0.00064732, 0.00040351]],
           dtype=np.float32)
       with variable_scope.variable_scope(
           "root", initializer=init_ops.constant_initializer(0.5)):
@@ -874,11 +879,10 @@ class RNNCellTest(test.TestCase):
         self.assertAllClose(res[1].h, expected_state_h)
 
   def testConv1DLSTMCell(self):
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       shape = [2, 1]
       filter_size = [3]
       num_features = 1
-      batch_size = 2
       expected_state_c = np.array(
           [[[1.4375670191], [1.4375670191]], [[2.7542609292], [2.7542609292]]],
           dtype=np.float32)
@@ -908,11 +912,10 @@ class RNNCellTest(test.TestCase):
         self.assertAllClose(res[1].h, expected_state_h)
 
   def testConv2DLSTMCell(self):
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       shape = [2, 2, 1]
       filter_size = [3, 3]
       num_features = 1
-      batch_size = 2
       expected_state_c = np.array(
           [[[[1.4375670191], [1.4375670191]], [[1.4375670191], [1.4375670191]]],
            [[[2.7542609292], [2.7542609292]], [[2.7542609292], [2.7542609292]]
@@ -950,11 +953,10 @@ class RNNCellTest(test.TestCase):
         self.assertAllClose(res[1].h, expected_state_h)
 
   def testConv3DLSTMCell(self):
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       shape = [2, 2, 2, 1]
       filter_size = [3, 3, 3]
       num_features = 1
-      batch_size = 2
       expected_state_c = np.array(
           [[[[[1.4375670191], [1.4375670191]], [[1.4375670191], [1.4375670191]]
             ], [[[1.4375670191], [1.4375670191]], [[1.4375670191],
@@ -1002,7 +1004,7 @@ class RNNCellTest(test.TestCase):
         self.assertAllClose(res[1].h, expected_state_h)
 
   def testHighwayWrapper(self):
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       with variable_scope.variable_scope(
           "base_cell", initializer=init_ops.constant_initializer(0.5)):
         x = array_ops.zeros([1, 3])
@@ -1031,57 +1033,224 @@ class RNNCellTest(test.TestCase):
     num_units = 4
     number_of_groups = 1
 
-    with self.test_session() as sess:
-      with variable_scope.variable_scope(
-          "root1", initializer=init_ops.constant_initializer(0.5)):
-        x = array_ops.ones([batch_size, num_units])
-        # When number_of_groups = 1, G-LSTM is equivalent to regular LSTM
-        gcell = contrib_rnn_cell.GLSTMCell(
-            num_units=num_units, number_of_groups=number_of_groups)
-        cell = rnn_cell.LSTMCell(num_units=num_units)
-        self.assertTrue(isinstance(gcell.state_size, tuple))
-        zero_state = gcell.zero_state(
-            batch_size=batch_size, dtype=dtypes.float32)
-        gh, gs = gcell(x, zero_state)
-        h, g = cell(x, zero_state)
+    # Try with input dimension equal to num_units or not.
+    for num_inputs in [num_units, num_units + number_of_groups]:
+      with self.cached_session() as sess:
+        with variable_scope.variable_scope(
+            "root1_%d" % num_inputs,
+            initializer=init_ops.constant_initializer(0.5)):
+          x = array_ops.ones([batch_size, num_inputs])
+          # When number_of_groups = 1, G-LSTM is equivalent to regular LSTM
+          gcell = contrib_rnn_cell.GLSTMCell(
+              num_units=num_units, number_of_groups=number_of_groups)
+          cell = rnn_cell.LSTMCell(num_units=num_units)
+          self.assertTrue(isinstance(gcell.state_size, tuple))
+          zero_state = gcell.zero_state(
+              batch_size=batch_size, dtype=dtypes.float32)
+          gh, gs = gcell(x, zero_state)
+          h, g = cell(x, zero_state)
 
-        sess.run([variables.global_variables_initializer()])
-        glstm_result = sess.run([gh, gs])
-        lstm_result = sess.run([h, g])
+          sess.run([variables.global_variables_initializer()])
+          glstm_result = sess.run([gh, gs])
+          lstm_result = sess.run([h, g])
 
-        self.assertAllClose(glstm_result[0], lstm_result[0], 1e-5)
-        self.assertAllClose(glstm_result[1], lstm_result[1], 1e-5)
+          self.assertAllClose(glstm_result[0], lstm_result[0], 1e-5)
+          self.assertAllClose(glstm_result[1], lstm_result[1], 1e-5)
 
     # Test that G-LSTM subgroup act like corresponding sub-LSTMs
     batch_size = 2
     num_units = 4
     number_of_groups = 2
 
-    with self.test_session() as sess:
+    # Try with num_inputs equal to or not equal to num_units.
+    for num_inputs in [num_units, num_units + number_of_groups]:
+      with self.cached_session() as sess:
+        with variable_scope.variable_scope(
+            "root2_%d" % num_inputs,
+            initializer=init_ops.constant_initializer(0.5)):
+          # input for G-LSTM with 2 groups
+          glstm_input = array_ops.ones([batch_size, num_inputs])
+          gcell = contrib_rnn_cell.GLSTMCell(
+              num_units=num_units, number_of_groups=number_of_groups)
+          gcell_zero_state = gcell.zero_state(
+              batch_size=batch_size, dtype=dtypes.float32)
+          gh, gs = gcell(glstm_input, gcell_zero_state)
+
+          # input for LSTM cell simulating single G-LSTM group
+          lstm_input = array_ops.ones(
+              [batch_size, num_inputs / number_of_groups])
+          # note division by number_of_groups. This cell one simulates G-LSTM
+          # group
+          cell = rnn_cell.LSTMCell(num_units=int(num_units / number_of_groups))
+          cell_zero_state = cell.zero_state(
+              batch_size=batch_size, dtype=dtypes.float32)
+          h, g = cell(lstm_input, cell_zero_state)
+
+          sess.run([variables.global_variables_initializer()])
+          [gh_res, h_res] = sess.run([gh, h])
+          self.assertAllClose(gh_res[:, 0:int(num_units / number_of_groups)],
+                              h_res, 1e-5)
+          self.assertAllClose(gh_res[:, int(num_units / number_of_groups):],
+                              h_res, 1e-5)
+
+  def testGLSTMCellFailure(self):
+    batch_size = 2
+    num_units = 4
+    number_of_groups = 2
+    with self.cached_session():
       with variable_scope.variable_scope(
-          "root2", initializer=init_ops.constant_initializer(0.5)):
-        # input for G-LSTM with 2 groups
-        glstm_input = array_ops.ones([batch_size, num_units])
+          "glstm_failure", initializer=init_ops.constant_initializer(0.5)):
         gcell = contrib_rnn_cell.GLSTMCell(
             num_units=num_units, number_of_groups=number_of_groups)
         gcell_zero_state = gcell.zero_state(
             batch_size=batch_size, dtype=dtypes.float32)
-        gh, gs = gcell(glstm_input, gcell_zero_state)
 
-        # input for LSTM cell simulating single G-LSTM group
-        lstm_input = array_ops.ones([batch_size, num_units / number_of_groups])
-        # note division by number_of_groups. This cell one simulates G-LSTM group
-        cell = rnn_cell.LSTMCell(num_units=int(num_units / number_of_groups))
-        cell_zero_state = cell.zero_state(
-            batch_size=batch_size, dtype=dtypes.float32)
-        h, g = cell(lstm_input, cell_zero_state)
+        # Try an input with statically-unknown innermost dimension.
+        glstm_input = array_ops.placeholder(
+            dtypes.float32, shape=[batch_size, None])
+        with self.assertRaisesRegexp(ValueError,
+                                     "input size must be statically known"):
+          gcell(glstm_input, gcell_zero_state)
 
+        # Try an input whose innermost dimension isn't divisible into groups.
+        glstm_input = array_ops.placeholder(
+            dtypes.float32, shape=[batch_size, 3])
+        with self.assertRaisesRegexp(
+            ValueError,
+            r"input size \(3\) must be divisible by number_of_groups \(2\)"):
+          gcell(glstm_input, gcell_zero_state)
+
+  def testCFNCell(self):
+    with self.cached_session() as sess:
+      with variable_scope.variable_scope("root"):
+        x = array_ops.zeros([1, 2])
+        m = array_ops.zeros([1, 2])
+        cell = contrib_rnn_cell.CFNCell(
+            units=2,
+            kernel_initializer=initializers.Constant(0.5))
+        g, _ = cell(x, m)
         sess.run([variables.global_variables_initializer()])
-        [gh_res, h_res] = sess.run([gh, h])
-        self.assertAllClose(gh_res[:, 0:int(num_units / number_of_groups)],
-                            h_res, 1e-5)
-        self.assertAllClose(gh_res[:, int(num_units / number_of_groups):],
-                            h_res, 1e-5)
+        res = sess.run([g], {
+            x.name: np.array([[1., 1.]]),
+            m.name: np.array([[0.1, 0.1]])
+        })
+        # Smoke test
+        self.assertAllClose(res[0], [[0.17188203, 0.17188203]])
+      with variable_scope.variable_scope("other"):
+        # Test CFN with input_size != num_units.
+        x = array_ops.zeros([1, 3])
+        m = array_ops.zeros([1, 2])
+        cell = contrib_rnn_cell.CFNCell(
+            units=2,
+            kernel_initializer=initializers.Constant(0.5))
+        g, _ = cell(x, m)
+        sess.run([variables.global_variables_initializer()])
+        res = sess.run([g], {
+            x.name: np.array([[1., 1., 1.]]),
+            m.name: np.array([[0.1, 0.1]])
+        })
+        # Smoke test
+        self.assertAllClose(res[0], [[0.15535763, 0.15535763]])
+
+  def testCFNCellEndToEnd(self):
+    with self.cached_session() as sess:
+      input_shape = 10
+      output_shape = 5
+      timestep = 4
+      batch = 100
+      (x_train, y_train), _ = testing_utils.get_test_data(
+          train_samples=batch,
+          test_samples=0,
+          input_shape=(timestep, input_shape),
+          num_classes=output_shape)
+      y_train = utils.to_categorical(y_train)
+      cell = contrib_rnn_cell.CFNCell(output_shape)
+
+      inputs = array_ops.placeholder(
+          dtypes.float32, shape=(None, timestep, input_shape))
+      predict = array_ops.placeholder(
+          dtypes.float32, shape=(None, output_shape))
+
+      outputs, state = rnn.dynamic_rnn(
+          cell, inputs, dtype=dtypes.float32)
+      self.assertEqual(outputs.shape.as_list(), [None, timestep, output_shape])
+      self.assertEqual(state.shape.as_list(), [None, output_shape])
+      loss = losses.softmax_cross_entropy(predict, state)
+      train_op = training.GradientDescentOptimizer(0.001).minimize(loss)
+
+      sess.run([variables.global_variables_initializer()])
+      _, outputs, state = sess.run(
+          [train_op, outputs, state], {inputs: x_train, predict: y_train})
+
+      self.assertEqual(len(outputs), batch)
+      self.assertEqual(len(state), batch)
+
+  def testMinimalRNNCell(self):
+    with self.cached_session() as sess:
+      with variable_scope.variable_scope(
+          "root"):
+        x = array_ops.zeros([1, 2])
+        m = array_ops.zeros([1, 2])
+        cell = contrib_rnn_cell.MinimalRNNCell(
+            units=2,
+            kernel_initializer=initializers.Constant(0.5))
+        g, _ = cell(x, m)
+        sess.run([variables.global_variables_initializer()])
+        res = sess.run([g], {
+            x.name: np.array([[1., 1.]]),
+            m.name: np.array([[0.1, 0.1]])
+        })
+        # Smoke test
+        self.assertAllClose(res[0], [[0.18899589, 0.18899589]])
+      with variable_scope.variable_scope(
+          "other"):
+        # Test MinimalRNN with input_size != num_units.
+        x = array_ops.zeros([1, 3])
+        m = array_ops.zeros([1, 2])
+        cell = contrib_rnn_cell.MinimalRNNCell(
+            units=2,
+            kernel_initializer=initializers.Constant(0.5))
+        g, _ = cell(x, m)
+        sess.run([variables.global_variables_initializer()])
+        res = sess.run([g], {
+            x.name: np.array([[1., 1., 1.]]),
+            m.name: np.array([[0.1, 0.1]])
+        })
+        # Smoke test
+        self.assertAllClose(res[0], [[0.19554167, 0.19554167]])
+
+  def testMinimalRNNCellEndToEnd(self):
+    with self.cached_session() as sess:
+      input_shape = 10
+      output_shape = 5
+      timestep = 4
+      batch = 100
+      (x_train, y_train), _ = testing_utils.get_test_data(
+          train_samples=batch,
+          test_samples=0,
+          input_shape=(timestep, input_shape),
+          num_classes=output_shape)
+      y_train = utils.to_categorical(y_train)
+      cell = contrib_rnn_cell.MinimalRNNCell(output_shape)
+
+      inputs = array_ops.placeholder(
+          dtypes.float32, shape=(None, timestep, input_shape))
+      predict = array_ops.placeholder(
+          dtypes.float32, shape=(None, output_shape))
+
+      outputs, state = rnn.dynamic_rnn(
+          cell, inputs, dtype=dtypes.float32)
+      self.assertEqual(outputs.shape.as_list(), [None, timestep, output_shape])
+      self.assertEqual(state.shape.as_list(), [None, output_shape])
+      loss = losses.softmax_cross_entropy(predict, state)
+      train_op = training.GradientDescentOptimizer(0.001).minimize(loss)
+
+      sess.run([variables.global_variables_initializer()])
+      _, outputs, state = sess.run(
+          [train_op, outputs, state], {inputs: x_train, predict: y_train})
+
+      self.assertEqual(len(outputs), batch)
+      self.assertEqual(len(state), batch)
 
 
 class LayerNormBasicLSTMCellTest(test.TestCase):
@@ -1089,7 +1258,7 @@ class LayerNormBasicLSTMCellTest(test.TestCase):
   # NOTE: all the values in the current test case have been calculated.
 
   def testBasicLSTMCell(self):
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       with variable_scope.variable_scope(
           "root", initializer=init_ops.constant_initializer(0.5)):
         x = array_ops.zeros([1, 2])
@@ -1157,7 +1326,7 @@ class LayerNormBasicLSTMCellTest(test.TestCase):
 
   def testBasicLSTMCellWithoutNorm(self):
     """Tests that BasicLSTMCell with layer_norm=False."""
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       with variable_scope.variable_scope(
           "root", initializer=init_ops.constant_initializer(0.5)):
         x = array_ops.zeros([1, 2])
@@ -1168,7 +1337,7 @@ class LayerNormBasicLSTMCellTest(test.TestCase):
         h1 = array_ops.zeros([1, 2])
         state1 = rnn_cell.LSTMStateTuple(c1, h1)
         state = (state0, state1)
-        single_cell = lambda: contrib_rnn_cell.LayerNormBasicLSTMCell(2, layer_norm=False)
+        single_cell = lambda: contrib_rnn_cell.LayerNormBasicLSTMCell(2, layer_norm=False)  # pylint: disable=line-too-long
         cell = rnn_cell.MultiRNNCell([single_cell() for _ in range(2)])
         g, out_m = cell(x, state)
         sess.run([variables.global_variables_initializer()])
@@ -1200,7 +1369,7 @@ class LayerNormBasicLSTMCellTest(test.TestCase):
         self.assertAllClose(expected_state1_h, actual_state1_h, 1e-5)
 
       with variable_scope.variable_scope(
-          "other", initializer=init_ops.constant_initializer(0.5)) as vs:
+          "other", initializer=init_ops.constant_initializer(0.5)):
         x = array_ops.zeros(
             [1, 3])  # Test BasicLSTMCell with input_size != num_units.
         c = array_ops.zeros([1, 2])
@@ -1224,7 +1393,7 @@ class LayerNormBasicLSTMCellTest(test.TestCase):
         self.assertAllClose(res[1].h, expected_h, 1e-5)
 
   def testBasicLSTMCellWithStateTuple(self):
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       with variable_scope.variable_scope(
           "root", initializer=init_ops.constant_initializer(0.5)):
         x = array_ops.zeros([1, 2])
@@ -1262,7 +1431,7 @@ class LayerNormBasicLSTMCellTest(test.TestCase):
 
   def testBasicLSTMCellWithStateTupleLayerNorm(self):
     """The results of LSTMCell and LayerNormBasicLSTMCell should be the same."""
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       with variable_scope.variable_scope(
           "root", initializer=init_ops.constant_initializer(0.5)):
         x = array_ops.zeros([1, 2])
@@ -1321,7 +1490,7 @@ class LayerNormBasicLSTMCellTest(test.TestCase):
     num_units = 5
     allowed_low = [1, 2, 3]
 
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       with variable_scope.variable_scope(
           "other", initializer=init_ops.constant_initializer(1)):
         x = array_ops.zeros([1, 5])
@@ -1408,7 +1577,7 @@ class CompiledWrapperTest(test.TestCase):
     atol = 1e-5
 
     random_seed.set_random_seed(1234)
-    with self.test_session(graph=ops.Graph()) as sess:
+    with self.session(graph=ops.Graph()) as sess:
       xla_ops = _create_multi_lstm_cell_ops(
           batch_size=batch_size,
           num_units=num_units,
@@ -1420,7 +1589,7 @@ class CompiledWrapperTest(test.TestCase):
       xla_results = sess.run(xla_ops)
 
     random_seed.set_random_seed(1234)
-    with self.test_session(graph=ops.Graph()) as sess:
+    with self.session(graph=ops.Graph()) as sess:
       non_xla_ops = _create_multi_lstm_cell_ops(
           batch_size=batch_size,
           num_units=num_units,
@@ -1447,7 +1616,7 @@ class CompiledWrapperTest(test.TestCase):
       self.assertAllClose(xla_g, non_xla_g, atol=atol)
 
   def testMultiRNNCellWithStateTuple(self):
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       with variable_scope.variable_scope(
           "root", initializer=init_ops.constant_initializer(0.5)):
         x = array_ops.zeros([1, 2])
@@ -1549,9 +1718,9 @@ class WeightNormLSTMCellTest(test.TestCase):
   """Compared cell output with pre-calculated values."""
 
   def _cell_output(self, cell):
-    """Calculate cell output"""
+    """Calculates cell output."""
 
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       init = init_ops.constant_initializer(0.5)
       with variable_scope.variable_scope("root",
                                          initializer=init):
@@ -1576,7 +1745,7 @@ class WeightNormLSTMCellTest(test.TestCase):
     return actual_state_c, actual_state_h
 
   def testBasicCell(self):
-    """Tests cell w/o peepholes and w/o normalisation"""
+    """Tests cell w/o peepholes and w/o normalisation."""
 
     def cell():
       return contrib_rnn_cell.WeightNormLSTMCell(2,
@@ -1592,7 +1761,7 @@ class WeightNormLSTMCellTest(test.TestCase):
     self.assertAllClose(expected_h, actual_h, 1e-5)
 
   def testNonbasicCell(self):
-    """Tests cell with peepholes and w/o normalisation"""
+    """Tests cell with peepholes and w/o normalisation."""
 
     def cell():
       return contrib_rnn_cell.WeightNormLSTMCell(2,
@@ -1607,9 +1776,8 @@ class WeightNormLSTMCellTest(test.TestCase):
     self.assertAllClose(expected_c, actual_c, 1e-5)
     self.assertAllClose(expected_h, actual_h, 1e-5)
 
-
   def testBasicCellWithNorm(self):
-    """Tests cell w/o peepholes and with normalisation"""
+    """Tests cell w/o peepholes and with normalisation."""
 
     def cell():
       return contrib_rnn_cell.WeightNormLSTMCell(2,
@@ -1625,7 +1793,7 @@ class WeightNormLSTMCellTest(test.TestCase):
     self.assertAllClose(expected_h, actual_h, 1e-5)
 
   def testNonBasicCellWithNorm(self):
-    """Tests cell with peepholes and with normalisation"""
+    """Tests cell with peepholes and with normalisation."""
 
     def cell():
       return contrib_rnn_cell.WeightNormLSTMCell(2,

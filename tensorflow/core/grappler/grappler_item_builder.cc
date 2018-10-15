@@ -29,6 +29,7 @@ limitations under the License.
 #include "tensorflow/core/framework/graph_def_util.h"
 #include "tensorflow/core/framework/node_def.pb.h"
 #include "tensorflow/core/framework/op.h"
+#include "tensorflow/core/framework/tensor.pb.h"
 #include "tensorflow/core/framework/tensor_shape.pb.h"
 #include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/framework/variable.pb.h"
@@ -38,6 +39,7 @@ limitations under the License.
 #include "tensorflow/core/grappler/op_types.h"
 #include "tensorflow/core/grappler/optimizers/model_pruner.h"
 #include "tensorflow/core/grappler/utils.h"
+#include "tensorflow/core/lib/gtl/map_util.h"
 #include "tensorflow/core/lib/io/path.h"
 #include "tensorflow/core/platform/protobuf_internal.h"
 #include "tensorflow/core/protobuf/meta_graph.pb.h"
@@ -77,7 +79,7 @@ void InitializeTensor(DataType type, Tensor* tensor) {
 // correct optimizations.
 Status OptimizeGraph(const GraphDef& graph_def_arg, GraphDef* output_graph_def,
                      const ItemConfig& cfg) {
-  if (!cfg.apply_optimizations && !cfg.inline_functions) {
+  if (!cfg.apply_optimizations && !cfg.erase_noinline_attributes) {
     return Status::OK();
   }
 
@@ -87,7 +89,7 @@ Status OptimizeGraph(const GraphDef& graph_def_arg, GraphDef* output_graph_def,
   // Make a local copy of graph def, because we need to change some things.
   GraphDef graph_def(graph_def_arg);
 
-  if (cfg.inline_functions && cfg.erase_noinline_attributes) {
+  if (cfg.erase_noinline_attributes) {
     // TF optimizer doesn't inline functions with "_noinline" attribute,
     // so let's go over the function library and erase it.
     for (auto& func : *graph_def.mutable_library()->mutable_function()) {
@@ -112,7 +114,6 @@ Status OptimizeGraph(const GraphDef& graph_def_arg, GraphDef* output_graph_def,
   } else {
     optimizer_opts->set_opt_level(::tensorflow::OptimizerOptions_Level_L0);
   }
-  optimizer_opts->set_do_function_inlining(cfg.inline_functions);
 
   // Create the function library runtime.
   std::unique_ptr<ProcessFunctionLibraryRuntime> pflr(
@@ -138,7 +139,7 @@ Status OptimizeGraph(const GraphDef& graph_def_arg, GraphDef* output_graph_def,
   // The default values of attributes might have been stripped by the optimizer.
   // Add them back.
   return AddDefaultAttrsToGraphDef(output_graph_def, *graphptr->op_registry(),
-                                   0);
+                                   0, true);
 }
 
 // Applies the same graph pruning logic to the graph as Session.Run in TF.
@@ -150,6 +151,27 @@ Status PruneGraph(GrapplerItem* item) {
   TF_RETURN_IF_ERROR(pruner.Optimize(cluster, *item, &pruned_graph));
   item->graph = std::move(pruned_graph);
   return Status::OK();
+}
+
+// Replace any unknown dimensions in a shape with
+// cfg.placeholder_unknown_output_shape_dim if it is no less than 0.
+Status ReplaceUnknownShapeDim(const ItemConfig& cfg,
+                              const TensorShapeProto& shape_pb_in,
+                              TensorShapeProto* shape_pb_out,
+                              TensorShape* shape_out) {
+  std::vector<int32> dims;
+  for (const auto& dim_proto : shape_pb_in.dim()) {
+    if (cfg.placeholder_unknown_output_shape_dim >= 0 &&
+        dim_proto.size() == -1) {
+      dims.push_back(cfg.placeholder_unknown_output_shape_dim);
+      shape_pb_out->add_dim()->set_size(
+          cfg.placeholder_unknown_output_shape_dim);
+    } else {
+      dims.push_back(std::max<int32>(1, dim_proto.size()));
+      shape_pb_out->add_dim()->set_size(dim_proto.size());
+    }
+  }
+  return TensorShapeUtils::MakeShape(dims.data(), dims.size(), shape_out);
 }
 
 }  // namespace
@@ -170,9 +192,13 @@ std::unique_ptr<GrapplerItem> GrapplerItemFromMetaGraphDef(
     const string feed_name = NodeName(feed_node);
     new_item->feed.emplace_back(feed_name, Tensor());
   }
+  for (const auto& fetch_node : cfg.fetch_nodes) {
+    new_item->fetch.emplace_back(NodeName(fetch_node));
+  }
 
-  // Attempt to detect the fetch node(s).
-  if (meta_graph.collection_def().count("train_op") > 0) {
+  // Attempt to detect the fetch node(s) if they were not set explicitly.
+  if (new_item->fetch.empty() &&
+      meta_graph.collection_def().count("train_op") > 0) {
     const CollectionDef& nodes = meta_graph.collection_def().at("train_op");
     if (nodes.has_node_list()) {
       for (const auto& node : nodes.node_list().value()) {
@@ -181,48 +207,92 @@ std::unique_ptr<GrapplerItem> GrapplerItemFromMetaGraphDef(
     }
   }
 
-  // Detect feed and fetch nodes from signature defs.
+  // Detect feed and fetch nodes from signature defs. Signatures may share same
+  // inputs or outputs.
+  std::unordered_set<string> signature_feed_nodes;
+  std::unordered_set<string> signature_fetch_nodes;
   for (const auto& name_and_signature : meta_graph.signature_def()) {
     for (const auto& name_and_input : name_and_signature.second.inputs()) {
       const TensorInfo& input = name_and_input.second;
       if (input.has_coo_sparse()) {
         // Define the shapes following the comment of CooSparse.
-        PartialTensorShape partial_shape_1d({-1});
-        PartialTensorShape partial_shape_2d({-1, -1});
-        TensorShape shape_1d;
-        TensorShape shape_2d;
-        if (!partial_shape_1d.AsTensorShape(&shape_1d) ||
-            !partial_shape_2d.AsTensorShape(&shape_2d)) {
-          LOG(ERROR) << "Internal error when constructing tensor shapes.";
-          return nullptr;
-        }
+        // TODO(yuefengz): we probably want to use different dim values for the
+        // three tensors of a SparseTensor.
+        int64 dim = std::max(1, cfg.placeholder_unknown_output_shape_dim);
+        TensorShape shape_1d({dim});
+        TensorShape shape_2d({dim, dim});
 
-        new_item->feed.emplace_back(
-            NodeName(input.coo_sparse().values_tensor_name()),
-            Tensor(input.dtype(), shape_1d));
-        new_item->feed.emplace_back(
-            NodeName(input.coo_sparse().indices_tensor_name()),
-            Tensor(DT_INT64, shape_2d));
-        new_item->feed.emplace_back(
-            NodeName(input.coo_sparse().dense_shape_tensor_name()),
-            Tensor(DT_INT64, shape_1d));
+        if (gtl::InsertIfNotPresent(
+                &signature_feed_nodes,
+                NodeName(input.coo_sparse().values_tensor_name()))) {
+          Tensor value_tensor(input.dtype(), shape_1d);
+          InitializeTensor(input.dtype(), &value_tensor);
+          new_item->feed.emplace_back(
+              NodeName(input.coo_sparse().values_tensor_name()), value_tensor);
+        }
+        if (gtl::InsertIfNotPresent(
+                &signature_feed_nodes,
+                NodeName(input.coo_sparse().indices_tensor_name()))) {
+          Tensor indices_tensor(DT_INT64, shape_2d);
+          InitializeTensor(input.dtype(), &indices_tensor);
+          new_item->feed.emplace_back(
+              NodeName(input.coo_sparse().indices_tensor_name()),
+              indices_tensor);
+        }
+        if (gtl::InsertIfNotPresent(
+                &signature_feed_nodes,
+                NodeName(input.coo_sparse().dense_shape_tensor_name()))) {
+          Tensor dense_shape_tensor(DT_INT64, shape_1d);
+          InitializeTensor(input.dtype(), &dense_shape_tensor);
+          new_item->feed.emplace_back(
+              NodeName(input.coo_sparse().dense_shape_tensor_name()),
+              dense_shape_tensor);
+        }
       } else {
-        new_item->feed.emplace_back(
-            NodeName(input.name()),
-            Tensor(input.dtype(), input.tensor_shape()));
+        if (gtl::InsertIfNotPresent(&signature_feed_nodes,
+                                    NodeName(input.name()))) {
+          TensorShape shape;
+          TensorShapeProto shape_proto;
+          Status s = ReplaceUnknownShapeDim(cfg, input.tensor_shape(),
+                                            &shape_proto, &shape);
+          if (!s.ok()) {
+            LOG(ERROR) << "Invalid shape for signature input " << input.name()
+                       << ": " << s << ", skipping this input";
+            return nullptr;
+          }
+
+          Tensor fake_input(input.dtype(), shape);
+          InitializeTensor(input.dtype(), &fake_input);
+          new_item->feed.emplace_back(NodeName(input.name()), fake_input);
+        }
       }
     }
     for (const auto& name_and_output : name_and_signature.second.outputs()) {
       const TensorInfo& output = name_and_output.second;
       if (output.has_coo_sparse()) {
-        new_item->fetch.push_back(
-            NodeName(output.coo_sparse().values_tensor_name()));
-        new_item->fetch.push_back(
-            NodeName(output.coo_sparse().indices_tensor_name()));
-        new_item->fetch.push_back(
-            NodeName(output.coo_sparse().dense_shape_tensor_name()));
+        if (gtl::InsertIfNotPresent(
+                &signature_fetch_nodes,
+                NodeName(output.coo_sparse().values_tensor_name()))) {
+          new_item->fetch.push_back(
+              NodeName(output.coo_sparse().values_tensor_name()));
+        }
+        if (gtl::InsertIfNotPresent(
+                &signature_fetch_nodes,
+                NodeName(output.coo_sparse().indices_tensor_name()))) {
+          new_item->fetch.push_back(
+              NodeName(output.coo_sparse().indices_tensor_name()));
+        }
+        if (gtl::InsertIfNotPresent(
+                &signature_fetch_nodes,
+                NodeName(output.coo_sparse().dense_shape_tensor_name()))) {
+          new_item->fetch.push_back(
+              NodeName(output.coo_sparse().dense_shape_tensor_name()));
+        }
       } else {
-        new_item->fetch.push_back(NodeName(output.name()));
+        if (gtl::InsertIfNotPresent(&signature_fetch_nodes,
+                                    NodeName(output.name()))) {
+          new_item->fetch.push_back(NodeName(output.name()));
+        }
       }
     }
   }
@@ -377,20 +447,8 @@ std::unique_ptr<GrapplerItem> GrapplerItemFromMetaGraphDef(
       // shape is not empty if the shape is partially defined.
       TensorShape shape;
       TensorShapeProto shape_proto;
-      std::vector<int32> dims;
-      for (const auto& dim_proto : node.attr().at("shape").shape().dim()) {
-        if (cfg.placeholder_unknown_output_shape_dim >= 0 &&
-            dim_proto.size() == -1) {
-          dims.push_back(cfg.placeholder_unknown_output_shape_dim);
-          shape_proto.add_dim()->set_size(
-              cfg.placeholder_unknown_output_shape_dim);
-        } else {
-          dims.push_back(std::max<int32>(1, dim_proto.size()));
-          shape_proto.add_dim()->set_size(dim_proto.size());
-        }
-      }
-      Status make_shape_status =
-          TensorShapeUtils::MakeShape(dims.data(), dims.size(), &shape);
+      Status make_shape_status = ReplaceUnknownShapeDim(
+          cfg, node.attr().at("shape").shape(), &shape_proto, &shape);
       if (!make_shape_status.ok()) {
         LOG(ERROR) << "Invalid shape for placeholder " << node.name() << ": "
                    << make_shape_status << ", skipping this input";
@@ -430,7 +488,9 @@ std::unique_ptr<GrapplerItem> GrapplerItemFromMetaGraphDef(
 
       if (cfg.feed_nodes.empty()) {
         // No specific feed nodes were given. Assume all placeholders are fed.
-        new_item->feed.emplace_back(node.name(), fake_input);
+        if (signature_feed_nodes.count(node.name()) == 0) {
+          new_item->feed.emplace_back(node.name(), fake_input);
+        }
       } else if (cfg.feed_nodes.count(node.name()) > 0) {
         // If specific feed nodes were given, only update their tensors.
         auto it = find_if(new_item->feed.begin(), new_item->feed.end(),
@@ -514,7 +574,7 @@ std::unique_ptr<GrapplerItem> GrapplerItemFromMetaGraphDef(
       &new_item->graph,
       FunctionLibraryDefinition(OpRegistry::Global(),
                                 new_item->graph.library()),
-      0);
+      0, true);
   if (!attr_status.ok()) {
     LOG(ERROR) << "Failed to instantiate default attribute values: "
                << attr_status.error_message();
@@ -568,6 +628,15 @@ std::unique_ptr<GrapplerItem> GrapplerItemFromMetaGraphDef(
     }
   }
   return new_item;
+}
+
+std::unique_ptr<GrapplerItem> GrapplerItemFromMetaGraphDefFile(
+    const string& id, const string& meta_graph_file, const ItemConfig& cfg) {
+  MetaGraphDef meta_graph;
+  if (!ReadMetaGraphDefFromFile(meta_graph_file, &meta_graph).ok()) {
+    return nullptr;
+  }
+  return GrapplerItemFromMetaGraphDef(id, meta_graph, cfg);
 }
 
 }  // end namespace grappler

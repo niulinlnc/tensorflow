@@ -46,14 +46,17 @@ bool AreAllBufferElementsEqualTo(const std::vector<Scalar>& buffer_data,
 // For example, an Add operator is trivial if
 // one of its operands is constant 0, a Mul operator is trivial
 // if one of its operands is constant 1, etc.
-bool RemoveTrivialBinaryOperator::Run(Model* model, std::size_t op_index) {
+::tensorflow::Status RemoveTrivialBinaryOperator::Run(Model* model,
+                                                      std::size_t op_index,
+                                                      bool* modified) {
+  *modified = false;
   const auto binary_it = model->operators.begin() + op_index;
   auto* binary_op = binary_it->get();
   if (binary_op->type != OperatorType::kAdd &&
       binary_op->type != OperatorType::kMul &&
       binary_op->type != OperatorType::kSub &&
       binary_op->type != OperatorType::kDiv) {
-    return false;
+    return ::tensorflow::Status::OK();
   }
 
   CHECK_EQ(binary_op->inputs.size(), 2);
@@ -66,17 +69,36 @@ bool RemoveTrivialBinaryOperator::Run(Model* model, std::size_t op_index) {
   };
   if (!is_input_constant[0] && !is_input_constant[1]) {
     // Neither input is constant, so nothing we can resolve here.
-    return false;
+    return ::tensorflow::Status::OK();
   }
   if (is_input_constant[0] && is_input_constant[1]) {
     // Both inputs are constants. That's a job for constants
     // propagation, not for us to handle here.
-    return false;
+    return ::tensorflow::Status::OK();
   }
   const int index_of_constant_input = is_input_constant[0] ? 0 : 1;
   const int index_of_variable_input = is_input_constant[0] ? 1 : 0;
   CHECK(is_input_constant[index_of_constant_input]);
   CHECK(!is_input_constant[index_of_variable_input]);
+
+  // If this was a broadcasting op we can't remove it as we need the broadcast.
+  // It's possible we could replace it with a cheaper op, though.
+  const auto& input_array_0 = model->GetArray(binary_op->inputs[0]);
+  const auto& input_array_1 = model->GetArray(binary_op->inputs[1]);
+  if (!input_array_0.has_shape() || !input_array_1.has_shape()) {
+    // Both input shapes must be known.
+    return ::tensorflow::Status::OK();
+  }
+  if (input_array_0.shape().dimensions_count() ==
+          input_array_1.shape().dimensions_count() &&
+      input_array_0.shape() != input_array_1.shape()) {
+    AddMessageF(
+        "Preserving %s even though it's trivial as we need to broadcast "
+        "(lhs %s, rhs %s)",
+        LogName(*binary_op), ShapeToString(input_array_0.shape()),
+        ShapeToString(input_array_1.shape()));
+    return ::tensorflow::Status::OK();
+  }
 
   // Now check if the constant operand makes this binary
   // operator trivial.
@@ -84,7 +106,7 @@ bool RemoveTrivialBinaryOperator::Run(Model* model, std::size_t op_index) {
       model->GetArray(binary_op->inputs[index_of_constant_input]);
   // For now, we only handle floats here.
   if (constant_input_array.data_type != ArrayDataType::kFloat) {
-    return false;
+    return ::tensorflow::Status::OK();
   }
   const auto& constant_input_float_data =
       constant_input_array.GetBuffer<ArrayDataType::kFloat>().data;
@@ -102,12 +124,13 @@ bool RemoveTrivialBinaryOperator::Run(Model* model, std::size_t op_index) {
   }
 
   if (!is_trivial) {
-    return false;
+    return ::tensorflow::Status::OK();
   }
 
   // Now we know that this node is trivial, so we can remove it.
   AddMessageF("Removing trivial %s", LogName(*binary_op));
-  return RemoveTrivialPassthroughOp(this, model, op_index);
+  *modified = RemoveTrivialPassthroughOp(this, model, op_index);
+  return ::tensorflow::Status::OK();
 }
 
 }  // namespace toco

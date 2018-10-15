@@ -25,18 +25,22 @@ limitations under the License.
 
 namespace toco {
 
-bool SplitLstmCellInputs::Run(Model* model, std::size_t op_index) {
+::tensorflow::Status SplitLstmCellInputs::Run(Model* model,
+                                              std::size_t op_index,
+                                              bool* modified) {
+  *modified = false;
   // Find lstm cell.
   auto op_it = model->operators.begin() + op_index;
   auto curr_op = op_it->get();
   if (curr_op->type != OperatorType::kLstmCell) {
-    return false;
+    return ::tensorflow::Status::OK();
   }
 
-  // Already an extended LstmCell with kExtendedLstmInputCount of inputs,
-  // do not need to split cell inputs.
-  if (curr_op->inputs.size() == kExtendedLstmInputCount) {
-    return false;
+  const auto* curr_lstm_op = static_cast<LstmCellOperator*>(curr_op);
+  // Already an extended LstmCell. Do not need to split cell inputs.
+  if (curr_lstm_op->kernel_type != LstmCellOperator::KERNEL_BASIC ||
+      curr_lstm_op->inputs.size() != LstmCellOperator::NUM_INPUTS) {
+    return ::tensorflow::Status::OK();
   }
 
   // Make sure the WEIGHTS_INPUT and BIASES_INPUT are constant arrays,
@@ -45,17 +49,18 @@ bool SplitLstmCellInputs::Run(Model* model, std::size_t op_index) {
           *model, curr_op->inputs[LstmCellOperator::WEIGHTS_INPUT]) ||
       !IsConstantParameterArray(
           *model, curr_op->inputs[LstmCellOperator::BIASES_INPUT])) {
-    return false;
+    return ::tensorflow::Status::OK();
   }
 
   // Make sure propagate_fixed_sizes has defined the size of the output.
   if (!model->GetArray(curr_op->outputs[LstmCellOperator::ACTIV_OUTPUT])
            .has_shape()) {
-    return false;
+    return ::tensorflow::Status::OK();
   }
 
   // Emplace a new LstmCell operator with extended inputs (kernel/lstm.cc).
   auto lstm_cell_op = absl::make_unique<LstmCellOperator>();
+  lstm_cell_op->kernel_type = LstmCellOperator::KERNEL_FULL;
   lstm_cell_op->inputs.resize(kExtendedLstmInputCount);
   int num_input = model->GetArray(curr_op->inputs[LstmCellOperator::DATA_INPUT])
                       .shape()
@@ -71,6 +76,12 @@ bool SplitLstmCellInputs::Run(Model* model, std::size_t op_index) {
   // Data input.
   lstm_cell_op->inputs[kInputTensor] =
       curr_op->inputs[LstmCellOperator::ACTIV_OUTPUT];
+
+  // Previous states.
+  lstm_cell_op->inputs[kInputActivationStateTensor] =
+      curr_op->inputs[LstmCellOperator::PREV_ACTIV_INPUT];
+  lstm_cell_op->inputs[kInputCellStateTensor] =
+      curr_op->inputs[LstmCellOperator::PREV_STATE_INPUT];
 
   // Get original weight tensor and decompose 1 tensor to 8 sub tensors.
   Array& kernel =
@@ -138,10 +149,9 @@ bool SplitLstmCellInputs::Run(Model* model, std::size_t op_index) {
   CreateOptionalArray(model, &(lstm_cell_op->inputs[kProjectionBiasTensor]),
                       base_name + "proj_bias");
 
-  // Reorder LstmCell's outputs.
-  lstm_cell_op->outputs.resize(LstmCellOperator::NUM_OUTPUTS);
-  lstm_cell_op->outputs[kScratchBufferTensor] =
-      curr_op->outputs[LstmCellOperator::CONCAT_TEMP];
+  // Reorder and resize LstmCell's outputs.
+  lstm_cell_op->outputs.resize(
+      ExtendedLstmCellOutputs::kExtendedLstmOutputCount);
   lstm_cell_op->outputs[kOutputStateTensor] =
       curr_op->outputs[LstmCellOperator::ACTIV_TEMP];
   lstm_cell_op->outputs[kCellStateTensor] =
@@ -159,13 +169,10 @@ bool SplitLstmCellInputs::Run(Model* model, std::size_t op_index) {
   // Erase curr lstm op being replaced.
   DeleteArrayIfUnused(curr_op->inputs[LstmCellOperator::WEIGHTS_INPUT], model);
   DeleteArrayIfUnused(curr_op->inputs[LstmCellOperator::BIASES_INPUT], model);
-  DeleteArrayIfUnused(curr_op->inputs[LstmCellOperator::PREV_ACTIV_INPUT],
-                      model);
-  DeleteArrayIfUnused(curr_op->inputs[LstmCellOperator::PREV_STATE_INPUT],
-                      model);
   model->operators.erase(FindOp(*model, curr_op));
 
-  return true;
+  *modified = true;
+  return ::tensorflow::Status::OK();
 }
 
 }  // namespace toco

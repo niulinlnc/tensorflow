@@ -25,18 +25,22 @@ limitations under the License.
 
 namespace toco {
 
-bool MergeLstmCellInputs::Run(Model* model, std::size_t op_index) {
+::tensorflow::Status MergeLstmCellInputs::Run(Model* model,
+                                              std::size_t op_index,
+                                              bool* modified) {
+  *modified = false;
   // Find lstm cell.
   auto op_it = model->operators.begin() + op_index;
   auto src_op = op_it->get();
   if (src_op->type != OperatorType::kLstmCell) {
-    return false;
+    return ::tensorflow::Status::OK();
   }
 
-  // Already a compact LstmCell with LstmCellOperator::NUM_INPUTS of inputs,
-  // do not need to merge cell inputs.
-  if (src_op->inputs.size() == LstmCellOperator::NUM_INPUTS) {
-    return false;
+  // Already a compact LstmCell. Do not need to merge cell inputs.
+  const auto* src_lstm_op = static_cast<LstmCellOperator*>(src_op);
+  if (src_lstm_op->kernel_type != LstmCellOperator::KERNEL_FULL ||
+      src_lstm_op->inputs.size() != kExtendedLstmInputCount) {
+    return ::tensorflow::Status::OK();
   }
 
   // Identify prev_activ_input, prev_state_input as required Op inputs,
@@ -44,12 +48,12 @@ bool MergeLstmCellInputs::Run(Model* model, std::size_t op_index) {
   string prev_activ_input;
   if (!GetMatchingRnnArray(model, src_op->outputs[kOutputTensor],
                            &prev_activ_input)) {
-    return false;
+    return ::tensorflow::Status::OK();
   }
   string prev_state_input;
   if (!GetMatchingRnnArray(model, src_op->outputs[kCellStateTensor],
                            &prev_state_input)) {
-    return false;
+    return ::tensorflow::Status::OK();
   }
 
   // Get LstmCell's cell, input, output size.
@@ -136,6 +140,7 @@ bool MergeLstmCellInputs::Run(Model* model, std::size_t op_index) {
 
   // Emplace a new LSTM cell operator (use basic 5 inputs kernel).
   auto lstm_cell_op = absl::make_unique<LstmCellOperator>();
+  lstm_cell_op->kernel_type = LstmCellOperator::KERNEL_BASIC;
 
   // Compact LstmCell's 5 inputs.
   lstm_cell_op->inputs.resize(LstmCellOperator::NUM_INPUTS);
@@ -146,16 +151,19 @@ bool MergeLstmCellInputs::Run(Model* model, std::size_t op_index) {
   lstm_cell_op->inputs[LstmCellOperator::PREV_ACTIV_INPUT] = prev_activ_input;
   lstm_cell_op->inputs[LstmCellOperator::PREV_STATE_INPUT] = prev_state_input;
 
-  // Reorder LstmCell's 4 outputs.
+  // Reorder LstmCell's 3 outputs.
   lstm_cell_op->outputs.resize(LstmCellOperator::NUM_OUTPUTS);
   lstm_cell_op->outputs[LstmCellOperator::ACTIV_OUTPUT] =
       src_op->outputs[kOutputTensor];
   lstm_cell_op->outputs[LstmCellOperator::STATE_OUTPUT] =
       src_op->outputs[kCellStateTensor];
-  lstm_cell_op->outputs[LstmCellOperator::CONCAT_TEMP] =
-      src_op->outputs[kScratchBufferTensor];
   lstm_cell_op->outputs[LstmCellOperator::ACTIV_TEMP] =
       src_op->outputs[kOutputStateTensor];
+  // Create a new temp array for the fourth output.
+  const string& concat_temp_array_name =
+      AvailableArrayName(*model, base_name + "concat_temp");
+  model->GetOrCreateArray(concat_temp_array_name);
+  lstm_cell_op->outputs[LstmCellOperator::CONCAT_TEMP] = concat_temp_array_name;
 
   // Add the op into model.
   model->operators.emplace(op_it, std::move(lstm_cell_op));
@@ -179,7 +187,8 @@ bool MergeLstmCellInputs::Run(Model* model, std::size_t op_index) {
   DeleteArrayIfUnused(src_op->inputs[kOutputGateBiasTensor], model);
   model->operators.erase(FindOp(*model, src_op));
 
-  return true;
+  *modified = true;
+  return ::tensorflow::Status::OK();
 }
 
 }  // namespace toco

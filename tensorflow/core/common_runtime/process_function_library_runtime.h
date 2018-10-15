@@ -19,6 +19,7 @@ limitations under the License.
 
 #include "tensorflow/core/common_runtime/device_mgr.h"
 #include "tensorflow/core/framework/function.h"
+#include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/protobuf/config.pb.h"
 
 namespace tensorflow {
@@ -33,6 +34,7 @@ class ProcessFunctionLibraryRuntime {
       const DeviceMgr* device_mgr, Env* env, int graph_def_version,
       const FunctionLibraryDefinition* lib_def,
       const OptimizerOptions& optimizer_options,
+      thread::ThreadPool* thread_pool = nullptr,
       DistributedFunctionLibraryRuntime* parent = nullptr);
 
   // With `custom_kernel_creator`.
@@ -41,6 +43,7 @@ class ProcessFunctionLibraryRuntime {
                                 const FunctionLibraryDefinition* lib_def,
                                 const OptimizerOptions& optimizer_options,
                                 CustomKernelCreator custom_kernel_creator,
+                                thread::ThreadPool* thread_pool,
                                 DistributedFunctionLibraryRuntime* parent);
 
   // Sends `tensors_to_send` from `source_device` to `target_device` using
@@ -57,8 +60,6 @@ class ProcessFunctionLibraryRuntime {
                             const std::vector<AllocatorAttributes>& alloc_attrs,
                             Rendezvous* rendezvous);
 
-  typedef std::function<void(const Status&)> StatusCallback;
-
   // Receives `received_tensors` from `target_device` (originally sent from
   // `source_device`) using `rendezvous`. Uses `key_prefix` to construct the
   // keys to be retrieved. `device_context` should be for the device receiving
@@ -71,7 +72,7 @@ class ProcessFunctionLibraryRuntime {
       DeviceContext* device_context,
       const std::vector<AllocatorAttributes>& alloc_attrs,
       Rendezvous* rendezvous, std::vector<Tensor>* received_tensors,
-      const StatusCallback& done);
+      StatusCallback done);
 
   static const char kDefaultFLRDevice[];
   // Returns the FunctionLibraryRuntime for the corresponding device_name.
@@ -145,22 +146,49 @@ class ProcessFunctionLibraryRuntime {
 
   mutable mutex mu_;
 
-  struct FunctionData {
-    const string target_device;
-    const FunctionLibraryRuntime::LocalHandle local_handle;
-
+  class FunctionData {
+   public:
     FunctionData(const string& target_device,
-                 FunctionLibraryRuntime::LocalHandle local_handle)
-        : target_device(target_device), local_handle(local_handle) {}
-    FunctionData() : FunctionData("", -1) {}
+                 FunctionLibraryRuntime::LocalHandle local_handle,
+                 const string& function_key)
+        : target_device_(target_device),
+          local_handle_(local_handle),
+          function_key_(function_key) {}
+
+    string target_device() { return target_device_; }
+    const string& function_key() { return function_key_; }
+
+    FunctionLibraryRuntime::LocalHandle local_handle() {
+      mutex_lock l(mu_);
+      return local_handle_;
+    }
+
+    // Initializes the FunctionData object by potentially making an Initialize
+    // call to the DistributedFunctionLibraryRuntime.
+    Status DistributedInit(
+        DistributedFunctionLibraryRuntime* parent, const string& function_name,
+        const FunctionLibraryDefinition& lib_def, AttrSlice attrs,
+        const FunctionLibraryRuntime::InstantiateOptions& options);
+
+   private:
+    mutex mu_;
+
+    const string target_device_;
+    FunctionLibraryRuntime::LocalHandle local_handle_ GUARDED_BY(mu_);
+    const string function_key_;
+    bool init_started_ GUARDED_BY(mu_) = false;
+    Status init_result_ GUARDED_BY(mu_);
+    Notification init_done_;
   };
 
   const DeviceMgr* const device_mgr_;
   const FunctionLibraryDefinition* lib_def_;
+  thread::ThreadPool* default_thread_pool_;
   // Holds all the function invocations here.
   std::unordered_map<string, FunctionLibraryRuntime::Handle> table_
       GUARDED_BY(mu_);
-  std::unordered_map<FunctionLibraryRuntime::Handle, FunctionData>
+  std::unordered_map<FunctionLibraryRuntime::Handle,
+                     std::unique_ptr<FunctionData>>
       function_data_ GUARDED_BY(mu_);
   std::unordered_map<Device*, std::unique_ptr<FunctionLibraryRuntime>> flr_map_;
   int next_handle_ GUARDED_BY(mu_);

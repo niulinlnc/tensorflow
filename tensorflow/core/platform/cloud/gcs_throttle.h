@@ -118,7 +118,9 @@ class GcsThrottle {
   /**
    * is_enabled determines if the throttle is enabled.
    *
-   * If !is_enabled(), AdmitRequest() will always return true.
+   * If !is_enabled(), AdmitRequest() will always return true. To enable the
+   * throttle, call SetConfig passing in a configuration that has enabled set to
+   * true.
    */
   bool is_enabled() LOCKS_EXCLUDED(mu_) {
     mutex_lock l(mu_);
@@ -130,7 +132,7 @@ class GcsThrottle {
    * UpdateState updates the available_tokens_ and last_updated_secs_ variables.
    *
    * UpdateState should be called in order to mark the passage of time, and
-   * therefore add tokens to the availble_tokens_ pool.
+   * therefore add tokens to the available_tokens_ pool.
    */
   void UpdateState() EXCLUSIVE_LOCKS_REQUIRED(mu_);
 

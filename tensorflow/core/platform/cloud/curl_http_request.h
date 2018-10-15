@@ -75,6 +75,8 @@ class CurlHttpRequest : public HttpRequest {
   /// Sets the 'Authorization' header to the value of 'Bearer ' + auth_token.
   void AddAuthBearerHeader(const string& auth_token) override;
 
+  void SetRequestStats(RequestStats* stats) override;
+
   /// Makes the request a DELETE request.
   void SetDeleteRequest() override;
 
@@ -165,6 +167,10 @@ class CurlHttpRequest : public HttpRequest {
   void CheckNotSent() const;
   StringPiece GetResponse() const;
 
+  /// Helper to convert the given CURLcode and error buffer, representing the
+  /// result of performing a transfer, into a Status with an error message.
+  Status CURLcodeToStatus(CURLcode code, const char* error_buffer);
+
   LibCurl* libcurl_;
   Env* env_;
 
@@ -179,12 +185,15 @@ class CurlHttpRequest : public HttpRequest {
     char* buffer_;
     size_t buffer_size_;
     size_t bytes_transferred_;
+    size_t bytes_received_;
   };
   DirectResponseState direct_response_ = {};
 
   CURL* curl_ = nullptr;
   curl_slist* curl_headers_ = nullptr;
   curl_slist* resolve_list_ = nullptr;
+
+  RequestStats* stats_ = nullptr;
 
   std::vector<char> default_response_buffer_;
 
@@ -213,6 +222,7 @@ class CurlHttpRequest : public HttpRequest {
 
   // Store the URI to help disambiguate requests when errors occur.
   string uri_;
+  RequestMethod method_ = RequestMethod::kGet;
 
   // Limit the size of a http response that is copied into an error message.
   const size_t response_to_error_limit_ = 500;
@@ -256,29 +266,7 @@ class LibCurl {
   virtual void curl_slist_free_all(curl_slist* list) = 0;
   virtual char* curl_easy_escape(CURL* curl, const char* str, int length) = 0;
   virtual void curl_free(void* p) = 0;
-
-  virtual const char* curl_easy_strerror(CURLcode errornum) = 0;
 };
-
-Status CURLcodeToStatus(CURLcode code);
-
-#define TF_CURL_RETURN_WITH_CONTEXT_IF_ERROR(_code, ...)                    \
-  do {                                                                      \
-    if (_code != CURLE_OK) {                                                \
-      ::tensorflow::Status _status = ::tensorflow::CURLcodeToStatus(_code); \
-      ::tensorflow::errors::AppendToMessage(&_status, __VA_ARGS__);         \
-      return _status;                                                       \
-    }                                                                       \
-  } while (0)
-
-#define TF_CURL_LOG_WITH_CONTEXT_IF_ERROR(_code, ...)                       \
-  do {                                                                      \
-    if (_code != CURLE_OK) {                                                \
-      ::tensorflow::Status _status = ::tensorflow::CURLcodeToStatus(_code); \
-      ::tensorflow::errors::AppendToMessage(&_status, __VA_ARGS__);         \
-      LOG(ERROR) << "curl error: " << _status.error_message();              \
-    }                                                                       \
-  } while (0)
 
 }  // namespace tensorflow
 

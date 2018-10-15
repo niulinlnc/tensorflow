@@ -12,9 +12,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
-#include <memory>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 #include <gmock/gmock.h>
@@ -126,7 +124,7 @@ class ResolveConstantConcatenationTest : public ::testing::Test {
       Array& in_array = model->GetOrCreateArray(concat_input_name);
       in_array.data_type = ArrayDataType::kFloat;
 
-      // Initialize shape for the input  array.
+      // Initialize shape for the input array.
       Shape* in_array_shape = in_array.mutable_shape();
       std::vector<int>* in_array_shape_dim = in_array_shape->mutable_dims();
       for (int i = 0; i < kDim; i++) {
@@ -168,7 +166,10 @@ TEST_F(ResolveConstantConcatenationTest, ConcatAtAxis0) {
   GraphTransformationsSet graph_transformation_set;
   graph_transformation_set.Add(new toco::ResolveConstantConcatenation);
   EXPECT_THAT(model.GetArrayMap().size(), 5);
-  (*graph_transformation_set.begin())->Run(&model, /*op_index=*/0);
+  bool modified;
+  ASSERT_TRUE((*graph_transformation_set.begin())
+                  ->Run(&model, /*op_index=*/0, &modified)
+                  .ok());
   EXPECT_THAT(model.GetArrayMap().size(), 1);
 
   auto& concatenated_array = (*model.GetArrayMap().begin()).second;
@@ -187,7 +188,10 @@ TEST_F(ResolveConstantConcatenationTest, ConcatAtAxis1) {
   GraphTransformationsSet graph_transformation_set;
   graph_transformation_set.Add(new toco::ResolveConstantConcatenation);
   EXPECT_THAT(model.GetArrayMap().size(), 5);
-  (*graph_transformation_set.begin())->Run(&model, /*op_index=*/0);
+  bool modified;
+  ASSERT_TRUE((*graph_transformation_set.begin())
+                  ->Run(&model, /*op_index=*/0, &modified)
+                  .ok());
   EXPECT_THAT(model.GetArrayMap().size(), 1);
 
   auto& concatenated_array = (*model.GetArrayMap().begin()).second;
@@ -206,7 +210,10 @@ TEST_F(ResolveConstantConcatenationTest, ConcatAtAxis2) {
   GraphTransformationsSet graph_transformation_set;
   graph_transformation_set.Add(new toco::ResolveConstantConcatenation);
   EXPECT_THAT(model.GetArrayMap().size(), 5);
-  (*graph_transformation_set.begin())->Run(&model, /*op_index=*/0);
+  bool modified;
+  ASSERT_TRUE((*graph_transformation_set.begin())
+                  ->Run(&model, /*op_index=*/0, &modified)
+                  .ok());
   EXPECT_THAT(model.GetArrayMap().size(), 1);
 
   auto& concatenated_array = (*model.GetArrayMap().begin()).second;

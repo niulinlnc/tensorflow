@@ -17,14 +17,15 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-from tensorflow.contrib.kafka.python.ops import gen_kafka_ops
-from tensorflow.python.data.ops.readers import Dataset
+from tensorflow.contrib.kafka.python.ops import gen_dataset_ops
+from tensorflow.contrib.kafka.python.ops import kafka_op_loader  # pylint: disable=unused-import
+from tensorflow.python.data.ops import dataset_ops
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import tensor_shape
 
 
-class KafkaDataset(Dataset):
+class KafkaDataset(dataset_ops.DatasetSource):
   """A Kafka Dataset that consumes the message.
   """
 
@@ -58,8 +59,8 @@ class KafkaDataset(Dataset):
         timeout, dtype=dtypes.int64, name="timeout")
 
   def _as_variant_tensor(self):
-    return gen_kafka_ops.kafka_dataset(self._topics, self._servers, self._group,
-                                       self._eof, self._timeout)
+    return gen_dataset_ops.kafka_dataset(self._topics, self._servers,
+                                         self._group, self._eof, self._timeout)
 
   @property
   def output_classes(self):

@@ -23,6 +23,7 @@ import six
 from tensorflow.python.estimator import model_fn
 from tensorflow.python.estimator.canned import head as head_lib
 from tensorflow.python.estimator.canned import metric_keys
+from tensorflow.python.estimator.export import export_output as export_output_lib
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import control_flow_ops
@@ -30,6 +31,7 @@ from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import metrics as metrics_lib
 from tensorflow.python.saved_model import signature_constants
 from tensorflow.python.summary import summary
+from tensorflow.python.training import training_util
 
 
 _DEFAULT_SERVING_KEY = signature_constants.DEFAULT_SERVING_SIGNATURE_DEF_KEY
@@ -226,9 +228,27 @@ class _MultiHead(head_lib._Head):  # pylint:disable=protected-access
         weights=example_weights_by_head,
         processed_labels=labels_by_head)
 
+  # TODO(b/65403806): Support regularization_losses arg.
   def create_estimator_spec(
-      self, features, mode, logits, labels=None, train_op_fn=None):
+      self, features, mode, logits, labels=None, optimizer=None,
+      train_op_fn=None):
     """See `_Head`."""
+    return self._create_estimator_spec(
+        features=features, mode=mode, logits=logits, labels=labels,
+        optimizer=optimizer, train_op_fn=train_op_fn, use_tpu=False)
+
+  def _create_tpu_estimator_spec(
+      self, features, mode, logits, labels=None, optimizer=None,
+      train_op_fn=None):
+    """See `_Head`."""
+    return self._create_estimator_spec(
+        features=features, mode=mode, logits=logits, labels=labels,
+        optimizer=optimizer, train_op_fn=train_op_fn, use_tpu=True)
+
+  def _create_estimator_spec(
+      self, features, mode, logits, labels=None, optimizer=None,
+      train_op_fn=None, use_tpu=False):
+    """Returns `EstimatorSpec` or `TPUEstimatorSpec`."""
     if isinstance(logits, dict):
       logits_dict = logits
     else:
@@ -248,16 +268,18 @@ class _MultiHead(head_lib._Head):  # pylint:disable=protected-access
               train_op_fn=_no_op_train_fn))
 
     if mode == model_fn.ModeKeys.TRAIN:
-      if train_op_fn is None:
-        raise ValueError('train_op_fn can not be None in TRAIN mode.')
-      spec = self._merge_train(all_estimator_spec, train_op_fn)
+      spec = self._merge_train(
+          all_estimator_spec=all_estimator_spec,
+          optimizer=optimizer,
+          train_op_fn=train_op_fn,
+          use_tpu=use_tpu)
       with ops.name_scope(''):
         summary.scalar(metric_keys.MetricKeys.LOSS, spec.loss)
       return spec
     if mode == model_fn.ModeKeys.PREDICT:
-      return self._merge_predict(all_estimator_spec)
+      return self._merge_predict(all_estimator_spec, use_tpu=use_tpu)
     if mode == model_fn.ModeKeys.EVAL:
-      return self._merge_eval(all_estimator_spec)
+      return self._merge_eval(all_estimator_spec, use_tpu=use_tpu)
     raise ValueError('mode={} unrecognized'.format(mode))
 
   def _split_logits(self, logits):
@@ -279,39 +301,56 @@ class _MultiHead(head_lib._Head):  # pylint:disable=protected-access
         begin_idx += head.logits_dimension
     return logits_dict
 
-  def _merge_train(self, all_estimator_spec, train_op_fn):
-    """Merges list of `EstimatorSpec` for training.
+  def _merge_train(
+      self, all_estimator_spec, optimizer, train_op_fn, use_tpu=False):
+    """Merges list of `EstimatorSpec` or `TPUEstimatorSpec` for training.
 
     Args:
-      all_estimator_spec: list of `EstimatorSpec` for the individual heads.
-      train_op_fn: Function to create train op. See `create_estimator_spec`
-        documentation for more details.
+      all_estimator_spec: list of `EstimatorSpec` or `TPUEstimatorSpec` for the
+        individual heads.
+      optimizer: `Optimizer` instance to create train op. See
+        `create_estimator_spec` documentation for more details.
+      train_op_fn: Function to create train op. Used if `optimizer` is `None`.
+      use_tpu: If `True`, returns `TPUEstimatorSpec`.
 
     Returns:
-      `EstimatorSpec` that merges all heads for TRAIN.
+      `EstimatorSpec` or `TPUEstimatorSpec` that merges all heads for TRAIN.
+
+    Raises:
+      ValueError: If both `train_op_fn` and `optimizer` are `None` in TRAIN
+        mode.
     """
     losses = []
-    metrics = {}
     for spec in all_estimator_spec:
       losses.append(spec.loss)
-      # Metric keys already contain head.name.
-      metrics.update(spec.eval_metric_ops or {})
     loss = _merge_losses(losses, self._head_weights)
+    if optimizer is not None:
+      if train_op_fn is not None:
+        raise ValueError('train_op_fn and optimizer cannot both be set.')
+      train_op = optimizer.minimize(
+          loss, global_step=training_util.get_global_step())
+    elif train_op_fn is not None:
+      train_op = train_op_fn(loss)
+    else:
+      raise ValueError('train_op_fn and optimizer cannot both be None.')
 
-    return model_fn.EstimatorSpec(
+    spec_type = (
+        model_fn._TPUEstimatorSpec if use_tpu else model_fn.EstimatorSpec)  # pylint:disable=protected-access
+    return spec_type(
         mode=model_fn.ModeKeys.TRAIN,
         loss=loss,
-        train_op=train_op_fn(loss),
-        eval_metric_ops=metrics)
+        train_op=train_op)
 
-  def _merge_predict(self, all_estimator_spec):
-    """Merges list of `EstimatorSpec` for prediction.
+  def _merge_predict(self, all_estimator_spec, use_tpu=False):
+    """Merges list of `EstimatorSpec` or `TPUEstimatorSpec` for prediction.
 
     Args:
-      all_estimator_spec: list of `EstimatorSpec` for the individual heads.
+      all_estimator_spec: list of `EstimatorSpec` or `TPUEstimatorSpec` for the
+        individual heads.
+      use_tpu: If `True`, returns `TPUEstimatorSpec`.
 
     Returns:
-      `EstimatorSpec` that merges all heads for PREDICT.
+      `EstimatorSpec` or `TPUEstimatorSpec` that merges all heads for PREDICT.
     """
     predictions = {}
     export_outputs = {
@@ -319,31 +358,48 @@ class _MultiHead(head_lib._Head):  # pylint:disable=protected-access
             all_estimator_spec[0].export_outputs,
             self._heads[0].name),
     }
+    merged_predict_outputs = {}
     for head, spec in zip(self._heads, all_estimator_spec):
       head_name = head.name
       for k, v in six.iteritems(spec.export_outputs):
         if k == _DEFAULT_SERVING_KEY:
           key = head_name
         else:
-          key = '%s/%s' % (k, head_name)
+          key = '%s/%s' % (head_name, k)
         export_outputs[key] = v
+        if (k == head_lib._PREDICT_SERVING_KEY and  # pylint:disable=protected-access
+            isinstance(v, export_output_lib.PredictOutput)):
+          for kp, vp in six.iteritems(v.outputs):
+            key = '%s/%s' % (head_name, kp)
+            merged_predict_outputs[key] = vp
       for k, v in six.iteritems(spec.predictions):
         predictions[(head_name, k)] = v
+    export_outputs[head_lib._PREDICT_SERVING_KEY] = (  # pylint:disable=protected-access
+        export_output_lib.PredictOutput(merged_predict_outputs))
 
-    return model_fn.EstimatorSpec(
+    spec_type = (
+        model_fn._TPUEstimatorSpec if use_tpu else model_fn.EstimatorSpec)  # pylint:disable=protected-access
+    return spec_type(
         mode=model_fn.ModeKeys.PREDICT,
         predictions=predictions,
         export_outputs=export_outputs)
 
-  def _merge_eval(self, all_estimator_spec):
+  def _merge_eval(self, all_estimator_spec, use_tpu=False):
     """Merges list of `EstimatorSpec` for eval.
 
     Args:
       all_estimator_spec: list of `EstimatorSpec` for the individual heads.
+      use_tpu: If `True`, will raise `NotImplementedError`, because TPU is not
+        yet supported for eval.
 
     Returns:
       `EstimatorSpec` that merges all heads for EVAL.
+    Raises:
+      NotImplementedError: If `use_tpu` is `True`.
     """
+    if use_tpu:
+      raise NotImplementedError(
+          'TPU evaluation is not implemented for multi_head.')
     predictions = {}
     metrics = {}
     losses = []

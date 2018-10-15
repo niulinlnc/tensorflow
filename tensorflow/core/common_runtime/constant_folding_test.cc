@@ -35,6 +35,7 @@ limitations under the License.
 #include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/lib/core/threadpool.h"
 #include "tensorflow/core/lib/strings/strcat.h"
+#include "tensorflow/core/platform/null_file_system.h"
 #include "tensorflow/core/platform/test.h"
 #include "tensorflow/core/public/session_options.h"
 
@@ -69,15 +70,6 @@ class ConstantFoldingTest : public ::testing::Test {
     test::ExpectTensorEqual<T>(t, test::AsTensor(values, shape));
   }
 
-  // Builds a map from node name to Node* for `graph`.
-  std::unordered_map<string, Node*> NodeNameIndex(const Graph& graph) {
-    std::unordered_map<string, Node*> index;
-    for (Node* node : graph.nodes()) {
-      index[node->name()] = node;
-    }
-    return index;
-  }
-
   // Constructs the following graph.
   /*
         s1  s2
@@ -109,7 +101,7 @@ TEST_F(ConstantFoldingTest, Basic) {
                             nullptr, &g, &was_mutated));
   EXPECT_TRUE(was_mutated);
 
-  std::unordered_map<string, Node*> index = NodeNameIndex(g);
+  std::unordered_map<string, Node*> index = g.BuildNodeNameIndex();
   Node* s1 = index.at("s1");
   Node* s2 = index.at("s2");
   // Nodes s1 and s2 now should now have a constant input
@@ -164,7 +156,7 @@ TEST_F(ConstantFoldingTest, DeterministicFolding) {
   Graph g2(OpRegistry::Global());
   TF_ASSERT_OK(build_graph_and_constant_folding(g2, true));
   EXPECT_EQ(g1.num_nodes(), g2.num_nodes());
-  auto index = NodeNameIndex(g2);
+  auto index = g2.BuildNodeNameIndex();
 
   // All the nodes in g1 are expected to be present in g2.
   for (int64 i = 0; i < g1.num_nodes(); ++i) {
@@ -187,7 +179,7 @@ TEST_F(ConstantFoldingTest, ConsiderFunction) {
       ConstantFold(opts, nullptr, Env::Default(), nullptr, &g, &was_mutated));
   EXPECT_TRUE(was_mutated);
 
-  std::unordered_map<string, Node*> index = NodeNameIndex(g);
+  std::unordered_map<string, Node*> index = g.BuildNodeNameIndex();
   Node* s1 = index.at("s1");
   Node* s2 = index.at("s2");
   Node* m2 = index.at("m2");
@@ -216,7 +208,7 @@ TEST_F(ConstantFoldingTest, TestNoReplaceAnotherConstant) {
                             nullptr, &g, &was_mutated));
   EXPECT_TRUE(was_mutated);
 
-  std::unordered_map<string, Node*> index = NodeNameIndex(g);
+  std::unordered_map<string, Node*> index = g.BuildNodeNameIndex();
   Node* d = index.at("d");
   Node* s3 = index.at("s3");
 
@@ -244,7 +236,7 @@ TEST_F(ConstantFoldingTest, TwoOutputs) {
                             nullptr, &g, &was_mutated));
   EXPECT_TRUE(was_mutated);
 
-  std::unordered_map<string, Node*> index = NodeNameIndex(g);
+  std::unordered_map<string, Node*> index = g.BuildNodeNameIndex();
   Node* b0 = index.at("b0");
   Node* b1 = index.at("b1");
 
@@ -276,7 +268,7 @@ TEST_F(ConstantFoldingTest, TwoOutputsFoldOneOutput) {
       ConstantFold(opts, nullptr, Env::Default(), nullptr, &g, &was_mutated));
   EXPECT_TRUE(was_mutated);
 
-  std::unordered_map<string, Node*> index = NodeNameIndex(g);
+  std::unordered_map<string, Node*> index = g.BuildNodeNameIndex();
   Node* b0 = index.at("b0");
   Node* b1 = index.at("b1");
   Node* b1_ident = index.at("b1_ident");
@@ -411,7 +403,7 @@ TEST_F(ConstantFoldingTest, ControlDependencies) {
                             nullptr, &g, &was_mutated));
   EXPECT_TRUE(was_mutated);
 
-  std::unordered_map<string, Node*> index = NodeNameIndex(g);
+  std::unordered_map<string, Node*> index = g.BuildNodeNameIndex();
   Node* recv1 = index.at("recv1");
   Node* recv2 = index.at("recv2");
   Node* send = index.at("send");
@@ -453,7 +445,7 @@ TEST_F(ConstantFoldingTest, SimpleShapeKnown) {
                             "receiver");
     TF_ASSERT_OK(s.ToGraph(&g));
   }
-  std::unordered_map<string, Node*> orig_index = NodeNameIndex(g);
+  std::unordered_map<string, Node*> orig_index = g.BuildNodeNameIndex();
   Node* recv0 = orig_index.at("recv0");
   Node* recv1 = orig_index.at("recv1");
   PartialTensorShape ps0;
@@ -472,7 +464,7 @@ TEST_F(ConstantFoldingTest, SimpleShapeKnown) {
       ConstantFold(opts, nullptr, Env::Default(), nullptr, &g, &was_mutated));
   EXPECT_TRUE(was_mutated);
 
-  std::unordered_map<string, Node*> index = NodeNameIndex(g);
+  std::unordered_map<string, Node*> index = g.BuildNodeNameIndex();
   Node* recv2 = index.at("recv2");
   Node* send0 = index.at("send0");
   Node* send1 = index.at("send1");
@@ -532,7 +524,7 @@ TEST_F(ConstantFoldingTest, PartialShape) {
                             "receiver");
     TF_ASSERT_OK(s.ToGraph(&g));
   }
-  std::unordered_map<string, Node*> orig_index = NodeNameIndex(g);
+  std::unordered_map<string, Node*> orig_index = g.BuildNodeNameIndex();
   Node* recv0 = orig_index.at("recv0");
   Node* recv1 = orig_index.at("recv1");
   PartialTensorShape ps0;
@@ -549,7 +541,7 @@ TEST_F(ConstantFoldingTest, PartialShape) {
       ConstantFold(opts, nullptr, Env::Default(), nullptr, &g, &was_mutated));
   EXPECT_TRUE(was_mutated);
 
-  std::unordered_map<string, Node*> index = NodeNameIndex(g);
+  std::unordered_map<string, Node*> index = g.BuildNodeNameIndex();
   Node* shape = index.at("shape");
   Node* size = index.at("size");
   Node* rank1 = index.at("rank1");
@@ -589,7 +581,7 @@ TEST_F(ConstantFoldingTest, ConstShapeKnown) {
                             "receiver");
     TF_ASSERT_OK(s.ToGraph(&g));
   }
-  std::unordered_map<string, Node*> orig_index = NodeNameIndex(g);
+  std::unordered_map<string, Node*> orig_index = g.BuildNodeNameIndex();
   Node* c0 = orig_index.at("c0");
   PartialTensorShape ps0;
   int c0_dims[] = {};
@@ -603,7 +595,7 @@ TEST_F(ConstantFoldingTest, ConstShapeKnown) {
       ConstantFold(opts, nullptr, Env::Default(), nullptr, &g, &was_mutated));
   EXPECT_TRUE(was_mutated);
 
-  std::unordered_map<string, Node*> index = NodeNameIndex(g);
+  std::unordered_map<string, Node*> index = g.BuildNodeNameIndex();
   Node* recv0 = index.at("recv0");
   Node* send0 = index.at("send0");
 
